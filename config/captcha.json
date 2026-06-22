@@ -1,0 +1,9 @@
+{
+  "mode": "auto",
+  "headed": true,
+  "timeout": 180000,
+  "autoTimeout": 45000,
+  "pollInterval": 500,
+  "allowManualFallback": true,
+  "blockResources": ["media", "font"]
+}
