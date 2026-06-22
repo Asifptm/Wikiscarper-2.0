@@ -4,6 +4,8 @@ A production-grade web scraping framework that renders pages with a real Chromiu
 
 Built for **low resource use and fast scrapes**: one shared browser, bounded caches, blocked heavy assets, and idle auto-close.
 
+**Repository:** [github.com/Asifptm/Wikiscarper-2.0](https://github.com/Asifptm/Wikiscarper-2.0)
+
 ```
 ███████╗███████╗ ██████╗██████╗  █████╗ ██████╗ ███████╗██████╗
 ██╔════╝██╔════╝██╔════╝██╔══██╗██╔══██╗██╔══██╗██╔════╝██╔══██╗
@@ -178,11 +180,21 @@ flowchart TD
 
 ### Prerequisites
 
+- **Git**
 - **Node.js 18+** (Node 22+ recommended)
 - **npm**
 - Windows / macOS / Linux
 
-### Steps
+### Clone the repository
+
+```bash
+git clone https://github.com/Asifptm/Wikiscarper-2.0.git
+cd Wikiscarper-2.0
+```
+
+> **SSH:** `git clone git@github.com:Asifptm/Wikiscarper-2.0.git`
+
+### Install and run
 
 ```bash
 # 1. Install dependencies
@@ -194,7 +206,24 @@ npx playwright install chromium
 
 # 3. Build the GUI renderer
 npm run build:renderer
+
+# 4. Start the desktop app
+npm start
 ```
+
+### Optional: local configuration
+
+For CAPTCHA testing or custom settings, copy the example config:
+
+```bash
+# Windows (PowerShell)
+copy config\local.json.example config\local.json
+
+# macOS / Linux
+cp config/local.json.example config/local.json
+```
+
+Edit `config/local.json` — for example set `"headless": false` when testing CAPTCHA pages.
 
 > If you see `browserType.launch: Executable doesn't exist...`, run:
 > ```bash
