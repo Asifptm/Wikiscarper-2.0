@@ -3,109 +3,155 @@
 const { Command } = require('commander');
 const fs = require('fs');
 const path = require('path');
-const { ScraperEngine } = require('../core/scraper');
 const { loadConfig, resolvePath } = require('../shared/config');
 const CacheManager = require('../cache');
 const Reporter = require('../core/reporter');
+const { runScrape } = require('./runScrape');
+const { paint, c, table } = require('./ui');
 
 const program = new Command();
 
-program
-  .name('electronscraper')
-  .description('ElectronScraper Pro CLI — headless web scraping to Markdown')
-  .version('2.0.0');
+function readUrlFile(filePath) {
+  return fs
+    .readFileSync(path.resolve(filePath), 'utf8')
+    .split('\n')
+    .map((l) => l.trim())
+    .filter((l) => l && !l.startsWith('#'));
+}
 
-program
-  .command('crawl')
-  .description('Scrape one or more URLs')
-  .argument('<urls...>', 'URLs to scrape')
-  .option('-o, --output <dir>', 'Output directory')
-  .option('-f, --format <fmt>', 'Output format: md|json|html', 'md')
-  .option('-b, --browser <type>', 'Browser engine', 'chromium')
-  .option('-H, --headless', 'Run headless', true)
-  .option('-t, --timeout <ms>', 'Navigation timeout', (v) => parseInt(v, 10))
-  .option('-w, --wait <strategy>', 'Wait strategy')
-  .option('-s, --scroll', 'Enable infinite scroll handler')
-  .option('-c, --captcha', 'Enable browser-native CAPTCHA solve (iframe click + token wait)')
-  .option('--no-bypass-login', 'Keep login/sign-up walls (do not dismiss them)')
-  .option('-C, --concurrency <n>', 'Parallel contexts', (v) => parseInt(v, 10))
-  .option('--cache', 'Use cache', true)
-  .option('--no-cache', 'Bypass cache')
-  .option('--direct', 'Use built-in HTTP fetch instead of Playwright')
-  .option('--proxy <url>', 'Proxy URL')
-  .option('--report', 'Write scrape report')
-  .option('--report-format <fmt>', 'Report format: json|html|both', 'both')
-  .option('-v, --verbose', 'Verbose logging')
-  .option('-q, --quiet', 'Suppress output')
-  .action(async (urls, options) => {
-    const engine = new ScraperEngine();
-    if (options.verbose) process.env.LOG_LEVEL = 'debug';
+function resolveUrls(urlArgs, filePath, linksOption) {
+  const urls = [...urlArgs];
+  if (filePath) urls.push(...readUrlFile(filePath));
+  if (linksOption) {
+    urls.push(
+      ...linksOption
+        .split(/[,;\n]+/)
+        .map((l) => l.trim())
+        .filter(Boolean),
+    );
+  }
+  return [...new Set(urls)];
+}
 
-    try {
-      const run = await engine.run({
-        urls,
-        output: options.output,
-        timeout: options.timeout,
-        waitFor: options.wait,
-        scroll: options.scroll,
-        captcha: options.captcha,
-        bypassLogin: options.bypassLogin,
-        concurrency: options.concurrency,
-        cache: options.cache,
-        direct: options.direct,
-        proxy: options.proxy,
-        report: options.report,
-        reportFormat: options.reportFormat,
-        cliArgs: process.argv.slice(2),
-      });
+function buildScrapeOptions(options, urls, config) {
+  const multi = urls.length > 1;
+  const batchMax = config?.scraper?.batchMax ?? 5;
+  const defaultConcurrency = multi
+    ? Math.min(batchMax, urls.length)
+    : config?.scraper?.concurrency ?? 1;
 
-      if (!options.quiet) {
-        for (const page of run.pages) {
-          if (page.error) console.error(`FAIL ${page.url}: ${page.error}`);
-          else console.log(`OK   ${page.url} -> ${page.output_file}`);
-        }
-        console.log(`Done: ${run.summary.success}/${run.summary.total} succeeded`);
-      }
+  return {
+    output: options.output,
+    outputMode: options.llm ? 'llm' : options.full ? 'full' : undefined,
+    outputFormat: options.format,
+    format: options.format,
+    timeout: options.timeout,
+    waitFor: options.wait,
+    scroll: options.scroll,
+    captcha: options.noCaptcha ? false : options.captcha !== false,
+    headless: options.headless,
+    fast: !options.noFast,
+    bypassLogin: options.bypassLogin,
+    concurrency: options.concurrency ?? defaultConcurrency,
+    cache: options.cache,
+    browserOnly: options.browserOnly,
+    directOnly: options.directOnly,
+    publicFirst: options.publicFirst,
+    llmStrict: options.llmStrict,
+    proxy: options.proxy,
+    report: options.report ?? multi,
+    reportFormat: options.reportFormat,
+    stdout: options.stdout && urls.length === 1,
+  };
+}
 
-      const exitCode = run.summary.failed > 0 ? 1 : 0;
-      await engine.close();
-      process.exit(exitCode);
-    } catch (err) {
-      console.error('Fatal:', err.message);
-      await engine.close();
-      process.exit(2);
-    }
-  });
+function attachScrapeOptions(cmd) {
+  return cmd
+    .option('-o, --output <dir>', 'Output directory')
+    .option('-f, --format <fmt>', 'Output format: md|json', 'md')
+    .option('--stdout', 'Print result to stdout (single URL only)')
+    .option('--full', 'Full page mode — nav, footer, sidebar, all links (default)')
+    .option('--llm', 'Main content only — strip nav/footer for LLM use')
+    .option('--no-llm-strict', 'Disable aggressive LLM cleanup (keep site chrome)')
+    .option('-H, --headless', 'Run headless', true)
+    .option('-t, --timeout <ms>', 'Navigation timeout', (v) => parseInt(v, 10))
+    .option('-w, --wait <strategy>', 'Wait strategy')
+    .option('-s, --scroll', 'Infinite scroll to load lazy content', true)
+    .option('--no-scroll', 'Disable infinite scroll handler')
+    .option('-c, --captcha', 'CAPTCHA solver (reCAPTCHA, hCaptcha, Turnstile)', true)
+    .option('--no-captcha', 'Disable CAPTCHA handler')
+    .option('--fast', 'Fast low-RAM mode (default)', true)
+    .option('--no-fast', 'Disable fast mode (thorough browser path)')
+    .option('--no-bypass-login', 'Keep login/sign-up walls (do not dismiss them)')
+    .option('-C, --concurrency <n>', 'Parallel workers (batch default: up to 5)', (v) => parseInt(v, 10))
+    .option('--links <urls>', 'Comma-separated batch URLs (max 5)')
+    .option('--cache', 'Use cache', true)
+    .option('--no-cache', 'Bypass cache')
+    .option('--browser-only', 'Force browser rendering (skip public HTTP fetch)')
+    .option('--direct-only', 'HTTP fetch only (no browser fallback)')
+    .option('--no-public-first', 'Skip automatic public HTTP attempt')
+    .option('--file <path>', 'Read URLs from file (one per line)')
+    .option('--proxy <url>', 'Proxy URL')
+    .option('--report', 'Write scrape report')
+    .option('--no-report', 'Skip scrape report')
+    .option('--report-format <fmt>', 'Report format: json|html|both', 'both')
+    .option('-v, --verbose', 'Verbose logging')
+    .option('-q, --quiet', 'Suppress progress UI');
+}
 
-program
-  .command('batch')
-  .description('Process a URL list file')
-  .requiredOption('-f, --file <path>', 'Path to urls.txt')
-  .option('-C, --concurrency <n>', 'Parallel workers', (v) => parseInt(v, 10))
-  .option('-o, --output <dir>', 'Output directory')
-  .option('--report', 'Write scrape report')
-  .option('-s, --scroll', 'Enable scroll handler')
-  .action(async (options) => {
-    const filePath = path.resolve(options.file);
-    const lines = fs.readFileSync(filePath, 'utf8')
-      .split('\n')
-      .map((l) => l.trim())
-      .filter((l) => l && !l.startsWith('#'));
+async function runScrapeCommand(urlArgs, options) {
+  if (options.verbose) process.env.LOG_LEVEL = 'debug';
 
-    const engine = new ScraperEngine();
-    const run = await engine.run({
-      urls: lines,
-      output: options.output,
-      concurrency: options.concurrency,
-      scroll: options.scroll,
-      report: options.report,
+  const config = loadConfig();
+  const batchMax = config.scraper?.batchMax ?? 5;
+  const urls = resolveUrls(urlArgs, options.file, options.links);
+
+  if (!urls.length) {
+    console.error(paint(c.red, '✗ Provide at least one URL, --links, or --file'));
+    process.exit(1);
+  }
+
+  if (urls.length > batchMax) {
+    console.error(
+      paint(c.red, `✗ Batch limit is ${batchMax} URLs (got ${urls.length}). Remove extras or scrape in smaller batches.`),
+    );
+    process.exit(1);
+  }
+
+  const scrapeOpts = buildScrapeOptions(options, urls, config);
+  const quiet = options.quiet || scrapeOpts.stdout;
+
+  try {
+    const { exitCode } = await runScrape(urls, scrapeOpts, {
+      quiet,
       cliArgs: process.argv.slice(2),
     });
+    process.exit(exitCode);
+  } catch {
+    process.exit(2);
+  }
+}
 
-    console.log(`Batch complete: ${run.summary.success}/${run.summary.total}`);
-    await engine.close();
-    process.exit(run.summary.failed > 0 ? 1 : 0);
-  });
+program
+  .name('wikiscraper')
+  .description('Convert public web pages to clean LLM-ready markdown (no login required)')
+  .version('2.0.0');
+
+const scrapeCmd = attachScrapeOptions(
+  program
+    .command('scrape')
+    .description('Scrape one or more public URLs to clean markdown (batch up to 5)')
+    .argument('[urls...]', 'URLs to scrape'),
+);
+
+scrapeCmd.action(runScrapeCommand);
+
+// Backward-compatible alias
+attachScrapeOptions(
+  program
+    .command('crawl', { hidden: true })
+    .argument('[urls...]', 'URLs to scrape'),
+).action(runScrapeCommand);
 
 const cacheCmd = program.command('cache').description('Inspect and manage cache');
 
@@ -116,8 +162,18 @@ cacheCmd
     const config = loadConfig();
     const cache = new CacheManager(config.cache);
     const entries = cache.list();
-    if (!entries.length) console.log('Cache is empty.');
-    else entries.forEach((e) => console.log(`${e.key.slice(0, 12)}… ${e.url}`));
+    if (!entries.length) {
+      console.log(paint(c.yellow, 'Cache is empty.'));
+    } else {
+      console.log(paint(c.bold, '\nCACHED URLS\n'));
+      console.log(
+        table(
+          ['HASH', 'URL'],
+          entries.slice(0, 50).map((e) => [e.key.slice(0, 10), e.url.slice(0, 60)]),
+        ),
+      );
+      if (entries.length > 50) console.log(paint(c.dim, `\n  … and ${entries.length - 50} more`));
+    }
     cache.close();
   });
 
@@ -127,7 +183,22 @@ cacheCmd
   .action(() => {
     const config = loadConfig();
     const cache = new CacheManager(config.cache);
-    console.log(JSON.stringify(cache.getStats(), null, 2));
+    const s = cache.getStats();
+    console.log(paint(c.bold, '\nCACHE STATS\n'));
+    console.log(
+      table(
+        ['LAYER', 'METRIC', 'VALUE'],
+        [
+          ['memory', 'hits', String(s.hits.memoryHits)],
+          ['memory', 'size', `${s.memory.size}/${s.memory.max}`],
+          ['sqlite', 'hits', String(s.hits.sqliteHits)],
+          ['sqlite', 'entries', String(s.sqlite.entries)],
+          ['disk', 'hits', String(s.hits.diskHits)],
+          ['disk', 'files', `${s.disk.files} (${s.disk.sizeMB} MB)`],
+          ['total', 'misses', String(s.hits.misses)],
+        ],
+      ),
+    );
     cache.close();
   });
 
@@ -142,7 +213,7 @@ cacheCmd
     const cache = new CacheManager(config.cache);
     if (options.url) cache.delete(options.url);
     else cache.clear(options.all ? undefined : options.layer);
-    console.log('Cache cleared.');
+    console.log(paint(c.green, '✓ Cache cleared.'));
     cache.close();
   });
 
@@ -156,7 +227,7 @@ program
     const cache = new CacheManager(config.cache);
     const entry = cache.get(options.url);
     if (!entry?.markdown) {
-      console.error('No cached markdown for URL');
+      console.error(paint(c.red, '✗ No cached markdown for URL'));
       cache.close();
       process.exit(1);
     }
@@ -164,7 +235,7 @@ program
     fs.mkdirSync(outDir, { recursive: true });
     const outFile = path.join(outDir, 'export.md');
     fs.writeFileSync(outFile, entry.markdown);
-    console.log(`Exported to ${outFile}`);
+    console.log(paint(c.green, `✓ Exported to ${outFile}`));
     cache.close();
   });
 
@@ -177,7 +248,17 @@ reportCmd
     const config = loadConfig();
     const reporter = new Reporter(config.reports);
     const reports = reporter.list();
-    reports.forEach((r) => console.log(`${r.id}  success=${r.summary?.success ?? 0}/${r.summary?.total ?? 0}`));
+    if (!reports.length) {
+      console.log(paint(c.yellow, 'No reports found.'));
+      return;
+    }
+    console.log(paint(c.bold, '\nREPORTS\n'));
+    console.log(
+      table(
+        ['RUN ID', 'OK/TOTAL'],
+        reports.map((r) => [r.id.slice(0, 28), `${r.summary?.success ?? 0}/${r.summary?.total ?? 0}`]),
+      ),
+    );
   });
 
 reportCmd
@@ -188,7 +269,7 @@ reportCmd
     const reporter = new Reporter(config.reports);
     const report = reporter.get(id);
     if (!report) {
-      console.error('Report not found');
+      console.error(paint(c.red, '✗ Report not found'));
       process.exit(1);
     }
     console.log(JSON.stringify(report, null, 2));

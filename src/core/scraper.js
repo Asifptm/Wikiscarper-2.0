@@ -1,12 +1,16 @@
 const fs = require('fs');
 const path = require('path');
 const CacheManager = require('../cache');
-const { htmlToMarkdown, htmlToMarkdownBuiltin } = require('./extractor');
+const { htmlToMarkdown, htmlToMarkdownBuiltin, extractPageContent, resolveTitle, slimHtmlForExtraction, extractHtmlTitle } = require('./extractor');
 const { fetchUrl } = require('./httpClient');
 const Reporter = require('./reporter');
 const createLogger = require('./logger');
 const { loadConfig, resolvePath } = require('../shared/config');
 const { slugify, isValidUrl } = require('../shared/utils');
+const { isRedditUrl, scrapeRedditPublic } = require('./reddit');
+const { isInstagramUrl, scrapeInstagramPublic, toInstagramEmbedUrl } = require('./instagram');
+const { buildScrapeResponse, extractDescription } = require('./llmOutput');
+const { isUsableScrapeResult, isCaptchaWallContent, toPublicUrl } = require('./publicScrape');
 
 let chromium = null;
 function getChromium() {
@@ -154,11 +158,12 @@ class ScraperEngine {
   }
 
   async _ensurePool(concurrency, options = {}) {
+    const captcha = this._resolveCaptcha(options);
     const headless = this._resolveHeadless(options);
     const launchOpts = {
       headless,
-      args: options.captcha ? CAPTCHA_LAUNCH_ARGS : LOW_RESOURCE_ARGS,
-      ignoreDefaultArgs: options.captcha ? ['--enable-automation'] : undefined,
+      args: captcha ? CAPTCHA_LAUNCH_ARGS : LOW_RESOURCE_ARGS,
+      ignoreDefaultArgs: captcha ? ['--enable-automation'] : undefined,
     };
 
     if (this.pool && this.pool.opts.headless !== headless) {
@@ -177,15 +182,21 @@ class ScraperEngine {
   }
 
   _resolveHeadless(options) {
-    if (options.captcha && this.config.captcha?.headed !== false) {
+    if (this._resolveCaptcha(options) && this.config.captcha?.headed !== false) {
       return false;
     }
     if (options.headless !== undefined) return options.headless;
     return this.config.scraper.headless ?? true;
   }
 
+  _resolveCaptcha(options) {
+    if (options.captcha === false) return false;
+    if (options.captcha === true) return true;
+    return this.config.captcha?.enabled !== false;
+  }
+
   _resolveBlockResources(options) {
-    if (options.captcha) {
+    if (this._resolveCaptcha(options)) {
       return (
         options.blockResources ??
         this.config.captcha?.blockResources ??
@@ -199,7 +210,195 @@ class ScraperEngine {
     );
   }
 
+  _resolveOutputOptions(options = {}) {
+    const mode = options.outputMode ?? this.config.output?.mode ?? 'llm';
+    return {
+      outputMode: mode,
+      fullPage: options.fullPage ?? (mode === 'full' ? this.config.output.fullPage !== false : false),
+      frontMatter:
+        options.frontMatter ??
+        (mode === 'full' ? this.config.output.frontMatter !== false : this.config.output.frontMatter === true),
+      llmStrict:
+        options.llmStrict ??
+        (mode === 'llm' ? this.config.output.llmStrict !== false : false),
+      outputFormat: options.outputFormat ?? options.format ?? 'md',
+    };
+  }
+
+  _writeScrapeOutput(url, data, options = {}) {
+    const outOpts = this._resolveOutputOptions(options);
+    const outputDir = resolvePath(options.output ?? this.config.output.dir);
+    fs.mkdirSync(outputDir, { recursive: true });
+    const base = slugify(url);
+
+    const pageResult = {
+      url,
+      markdown: data.markdown,
+      word_count: data.wordCount ?? 0,
+      status: data.status ?? null,
+      total_ms: data.totalMs ?? 0,
+      cache_hit: data.cacheHit ?? false,
+      error: data.error ?? null,
+    };
+
+    const meta = {
+      title: data.title ?? null,
+      description: data.description ?? null,
+    };
+
+    if (outOpts.outputFormat === 'json') {
+      const payload = buildScrapeResponse(pageResult, meta);
+      const outputFile = path.join(outputDir, `${base}.json`);
+      fs.writeFileSync(outputFile, JSON.stringify(payload, null, 2));
+      return { outputFile, payload, jsonPayload: payload };
+    }
+
+    const outputFile = path.join(outputDir, `${base}.md`);
+    fs.writeFileSync(outputFile, data.markdown);
+    return { outputFile, payload: null, jsonPayload: null };
+  }
+
+  _markdownOptions(options = {}, stats = {}) {
+    const out = this._resolveOutputOptions(options);
+    return {
+      outputMode: out.outputMode,
+      fullPage: out.fullPage,
+      frontMatter: out.frontMatter,
+      llmStrict: out.llmStrict,
+      stats,
+    };
+  }
+
+  _resolvePublicOptions(options = {}) {
+    return {
+      publicFirst:
+        options.publicFirst !== false && this.config.scraper?.publicFirst !== false,
+      browserOnly: options.browserOnly === true,
+      directOnly: options.directOnly === true || options.direct === true,
+      bypassLogin:
+        options.bypassLogin !== false && this.config.scraper?.bypassLogin !== false,
+    };
+  }
+
+  _resolveRuntimeOptions(options = {}) {
+    const fast = options.fast !== false && this.config.scraper?.fastMode !== false;
+    const captcha =
+      options.captcha === false ? false : options.captcha === true ? true : this._resolveCaptcha(options);
+
+    return {
+      fast,
+      scroll: options.scroll !== false && this.config.scraper?.scroll !== false,
+      captcha,
+      storeHtml: fast ? options.storeHtml === true : options.storeHtml !== false,
+      loginWallAttempts: fast ? 1 : 3,
+      loginWallDelay: fast ? 400 : 1200,
+      skipLazyImages: fast,
+      captchaQuickScan: fast && !captcha,
+    };
+  }
+
+  async _tryDirectFetch(url, options, start) {
+    const navStart = Date.now();
+    const fetchUrl_public = toPublicUrl(url);
+    try {
+      const res = await fetchUrl(fetchUrl_public, {
+        userAgent: options.userAgent ?? this.config.scraper.userAgent,
+        timeout: options.timeout ?? this.config.scraper.timeout ?? 30000,
+      });
+
+      const status = res.statusCode ?? 200;
+      if (status >= 400) {
+        throw new Error(`ERR_NAV_HTTP_${status}: server returned ${status}`);
+      }
+
+      const extractStart = Date.now();
+      const pageTitle = extractHtmlTitle(res.body);
+      const out = this._resolveOutputOptions(options);
+      const mdOpts = {
+        url,
+        title: pageTitle ?? undefined,
+        fullHtml: res.body,
+        description: extractDescription(res.body),
+        mainContent: true,
+        fullPage: out.fullPage,
+        ...this._markdownOptions(options, {
+          status,
+          contentType: res.headers['content-type'],
+          etag: res.headers.etag,
+          durationMs: Date.now() - start,
+        }),
+      };
+
+      const htmlInput = slimHtmlForExtraction(res.body);
+
+      const { markdown, wordCount, meta } = htmlToMarkdown(htmlInput, mdOpts);
+
+      return {
+        markdown,
+        wordCount,
+        meta,
+        status,
+        body: options.storeHtml ? res.body : null,
+        slimHtml: htmlInput,
+        headers: res.headers,
+        navMs: Date.now() - navStart,
+        extractMs: Date.now() - extractStart,
+        method: 'direct',
+      };
+    } catch (err) {
+      return { error: err.message, navMs: Date.now() - navStart, extractMs: 0 };
+    }
+  }
+
+  _buildDirectResult(url, data, options, start, useCache) {
+    const { outputFile } = this._writeScrapeOutput(
+      url,
+      {
+        markdown: data.markdown,
+        wordCount: data.wordCount,
+        status: data.status,
+        totalMs: Date.now() - start,
+        title: data.meta?.title ?? resolveTitle(data.body ?? data.slimHtml ?? '', url),
+        description: extractDescription(data.body ?? data.slimHtml ?? ''),
+      },
+      options,
+    );
+
+    if (useCache) {
+      this.cache.set(url, {
+        html: data.body,
+        markdown: data.markdown,
+        wordCount: data.wordCount,
+        status: data.status,
+        headers: data.headers,
+        etag: data.headers?.etag,
+        outputFile,
+      });
+    }
+
+    return {
+      url,
+      status: data.status,
+      cache_hit: false,
+      cache_layer: null,
+      markdown: data.markdown,
+      word_count: data.wordCount,
+      output_file: outputFile,
+      method: data.method ?? 'direct',
+      nav_ms: data.navMs,
+      render_ms: 0,
+      extract_ms: data.extractMs,
+      total_ms: Date.now() - start,
+      scrolls: 0,
+      captcha: false,
+      error: null,
+    };
+  }
+
   async scrapeUrl(url, options = {}) {
+    const runtime = this._resolveRuntimeOptions(options);
+    options = { ...options, ...runtime };
+
     if (!isValidUrl(url)) {
       throw new Error(`ERR_NAV_INVALID: Invalid URL — ${url}`);
     }
@@ -211,6 +410,17 @@ class ScraperEngine {
       const cached = this.cache.get(url);
       if (cached?.markdown) {
         this._emitProgress({ url, status: 'cache-hit', layer: cached.cacheLayer });
+        const { outputFile } = this._writeScrapeOutput(
+          url,
+          {
+            markdown: cached.markdown,
+            wordCount: cached.wordCount,
+            status: cached.status ?? 200,
+            totalMs: Date.now() - start,
+            cacheHit: true,
+          },
+          options,
+        );
         return {
           url,
           status: cached.status ?? 200,
@@ -218,7 +428,7 @@ class ScraperEngine {
           cache_layer: cached.cacheLayer,
           markdown: cached.markdown,
           word_count: cached.wordCount ?? 0,
-          output_file: cached.outputFile ?? null,
+          output_file: outputFile,
           nav_ms: 0,
           render_ms: 0,
           extract_ms: 0,
@@ -230,82 +440,214 @@ class ScraperEngine {
       }
     }
 
-    // Primary engine: Playwright (Chromium) + Turndown.
-    // Optional lightweight path: only when explicitly requested via options.direct.
-    if (options.direct === true) {
+    // Site-specific public endpoints (Reddit, Instagram) — automatic, no CLI flags.
+    if (isRedditUrl(url) && this.config.reddit?.enabled !== false) {
+      this._emitProgress({ url, status: 'started', method: 'reddit-public' });
+      return this.scrapeReddit(url, options, start, useCache);
+    }
+
+    if (isInstagramUrl(url) && this.config.instagram?.enabled !== false) {
+      this._emitProgress({ url, status: 'started', method: 'instagram-public' });
+      return this.scrapeInstagram(url, options, start, useCache);
+    }
+
+    const pub = this._resolvePublicOptions(options);
+
+    // Direct-only mode: HTTP fetch, no browser fallback.
+    if (pub.directOnly) {
+      this._emitProgress({ url, status: 'started', method: 'direct' });
       return this.scrapeDirect(url, options, start, useCache);
     }
 
-    return this.scrapeWithBrowser(url, options, start, useCache);
+    // Browser-only mode: skip public HTTP attempt.
+    if (pub.browserOnly) {
+      this._emitProgress({ url, status: 'started', method: 'browser' });
+      return this.scrapeWithBrowser(url, options, start, useCache);
+    }
+
+    // Global public-first: try direct HTTP (no login), then browser with login-wall dismissal.
+    if (pub.publicFirst) {
+      this._emitProgress({ url, status: 'started', method: 'public-first' });
+      const attempt = await this._tryDirectFetch(url, options, start);
+      if (!attempt.error) {
+        const preview = {
+          markdown: attempt.markdown,
+          word_count: attempt.wordCount,
+          error: null,
+        };
+        if (isUsableScrapeResult(preview)) {
+          this._emitProgress({ url, status: 'done', method: 'direct' });
+          return this._buildDirectResult(url, attempt, options, start, useCache);
+        }
+        this._emitProgress({
+          url,
+          status: 'fallback-browser',
+          reason: isCaptchaWallContent(preview.markdown)
+            ? 'captcha wall'
+            : 'login wall or thin content',
+        });
+      } else {
+        this._emitProgress({ url, status: 'fallback-browser', error: attempt.error });
+      }
+    }
+
+    this._emitProgress({ url, status: 'started', method: 'browser' });
+    return this.scrapeWithBrowser(
+      url,
+      { ...options, bypassLogin: pub.bypassLogin },
+      start,
+      useCache,
+    );
   }
 
-  async scrapeDirect(url, options, start, useCache) {
-    const navStart = Date.now();
+  async scrapeReddit(url, options, start, useCache) {
+    this._emitProgress({ url, status: 'navigating' });
     try {
-      const res = await fetchUrl(url, {
-        userAgent: options.userAgent ?? this.config.scraper.userAgent,
-        timeout: options.timeout ?? this.config.scraper.timeout ?? 30000,
-      });
-
-      const navMs = Date.now() - navStart;
       const extractStart = Date.now();
-      const status = res.statusCode ?? 200;
-
-      if (status >= 400) {
-        throw new Error(`ERR_NAV_HTTP_${status}: server returned ${status}`);
-      }
-
-      const { markdown, wordCount } = htmlToMarkdownBuiltin(res.body, {
-        url,
-        frontMatter: this.config.output.frontMatter !== false,
-        stats: {
-          status,
-          contentType: res.headers['content-type'],
-          etag: res.headers.etag,
-          durationMs: Date.now() - start,
-        },
+      const out = this._resolveOutputOptions(options);
+      const result = await scrapeRedditPublic(url, {
+        userAgent: options.userAgent ?? this.config.scraper.userAgent ?? undefined,
+        timeout: options.timeout ?? this.config.scraper.timeout ?? 30000,
+        frontMatter: out.frontMatter,
       });
 
       const extractMs = Date.now() - extractStart;
-
-      const outputDir = resolvePath(options.output ?? this.config.output.dir);
-      fs.mkdirSync(outputDir, { recursive: true });
-      const outputFile = path.join(outputDir, `${slugify(url)}.md`);
-      fs.writeFileSync(outputFile, markdown);
+      const { outputFile } = this._writeScrapeOutput(
+        url,
+        {
+          markdown: result.markdown,
+          wordCount: result.wordCount,
+          status: result.status,
+          totalMs: Date.now() - start,
+          title: result.meta?.title ?? null,
+        },
+        options,
+      );
 
       if (useCache) {
         this.cache.set(url, {
-          html: res.body,
-          markdown,
-          wordCount,
-          status,
-          headers: res.headers,
-          etag: res.headers.etag,
+          html: null,
+          markdown: result.markdown,
+          wordCount: result.wordCount,
+          status: result.status,
+          headers: {},
           outputFile,
         });
       }
 
-      this._emitProgress({ url, status: 'done', outputFile, method: 'direct' });
+      this._emitProgress({ url, status: 'done', outputFile, method: 'reddit' });
 
       return {
         url,
-        status,
+        status: result.status,
         cache_hit: false,
         cache_layer: null,
-        markdown,
-        word_count: wordCount,
+        markdown: result.markdown,
+        word_count: result.wordCount,
         output_file: outputFile,
-        method: 'direct',
-        nav_ms: navMs,
+        method: 'reddit-public',
+        nav_ms: result.navMs,
         render_ms: 0,
         extract_ms: extractMs,
         total_ms: Date.now() - start,
         scrolls: 0,
         captcha: false,
+        captcha_status: 'skipped',
         error: null,
       };
     } catch (err) {
-      this.logger.error('Direct scrape failed', { url, error: err.message });
+      this.logger.warn('Reddit public scrape failed, falling back to browser', {
+        url,
+        error: err.message,
+      });
+      this._emitProgress({ url, status: 'fallback-reddit', error: err.message });
+      return this.scrapeRedditWithBrowser(url, options, start, useCache);
+    }
+  }
+
+  async scrapeRedditWithBrowser(url, options, start, useCache) {
+    const { toOldRedditUrl } = require('./reddit');
+    const oldUrl = toOldRedditUrl(url);
+    return this.scrapeWithBrowser(oldUrl, { ...options, reddit: false }, start, useCache);
+  }
+
+  async scrapeInstagram(url, options, start, useCache) {
+    this._emitProgress({ url, status: 'navigating' });
+    try {
+      const extractStart = Date.now();
+      const out = this._resolveOutputOptions(options);
+      const result = await scrapeInstagramPublic(url, {
+        userAgent: options.userAgent ?? this.config.scraper.userAgent ?? undefined,
+        timeout: options.timeout ?? this.config.scraper.timeout ?? 30000,
+        frontMatter: out.frontMatter,
+      });
+
+      const extractMs = Date.now() - extractStart;
+      const { outputFile } = this._writeScrapeOutput(
+        url,
+        {
+          markdown: result.markdown,
+          wordCount: result.wordCount,
+          status: result.status,
+          totalMs: Date.now() - start,
+          title: result.meta?.title ?? null,
+          description: result.meta?.description ?? null,
+        },
+        options,
+      );
+
+      if (useCache) {
+        this.cache.set(url, {
+          html: null,
+          markdown: result.markdown,
+          wordCount: result.wordCount,
+          status: result.status,
+          headers: {},
+          outputFile,
+        });
+      }
+
+      this._emitProgress({ url, status: 'done', outputFile, method: 'instagram' });
+
+      return {
+        url,
+        status: result.status,
+        cache_hit: false,
+        cache_layer: null,
+        markdown: result.markdown,
+        word_count: result.wordCount,
+        output_file: outputFile,
+        method: result.method,
+        nav_ms: result.navMs,
+        render_ms: 0,
+        extract_ms: extractMs,
+        total_ms: Date.now() - start,
+        scrolls: 0,
+        captcha: false,
+        captcha_status: 'skipped',
+        error: null,
+      };
+    } catch (err) {
+      this.logger.warn('Instagram public scrape failed, falling back to embed browser', {
+        url,
+        error: err.message,
+      });
+      this._emitProgress({ url, status: 'fallback-instagram', error: err.message });
+      return this.scrapeInstagramWithBrowser(url, options, start, useCache);
+    }
+  }
+
+  async scrapeInstagramWithBrowser(url, options, start, useCache) {
+    const embedUrl = toInstagramEmbedUrl(url);
+    return this.scrapeWithBrowser(embedUrl, { ...options, instagram: false }, start, useCache);
+  }
+
+  async scrapeDirect(url, options, start, useCache) {
+    this._emitProgress({ url, status: 'navigating' });
+    const attempt = await this._tryDirectFetch(url, options, start);
+    if (attempt.error) {
+      this.logger.error('Direct scrape failed', { url, error: attempt.error });
+      this._emitProgress({ url, status: 'failed', error: attempt.error });
       return {
         url,
         status: null,
@@ -315,15 +657,18 @@ class ScraperEngine {
         word_count: 0,
         output_file: null,
         method: 'direct',
-        nav_ms: Date.now() - navStart,
+        nav_ms: attempt.navMs,
         render_ms: 0,
-        extract_ms: 0,
+        extract_ms: attempt.extractMs,
         total_ms: Date.now() - start,
         scrolls: 0,
         captcha: false,
-        error: err.message,
+        error: attempt.error,
       };
     }
+
+    this._emitProgress({ url, status: 'done', method: 'direct' });
+    return this._buildDirectResult(url, attempt, options, start, useCache);
   }
 
   async scrapeWithBrowser(url, options, start, useCache) {
@@ -331,6 +676,7 @@ class ScraperEngine {
     const { solve_captcha } = require('./captcha');
     const { dismissLoginWall } = require('./loginWall');
 
+    options = { ...options, captcha: this._resolveCaptcha(options) };
     const concurrency = options.concurrency ?? this.config.scraper.concurrency ?? 3;
 
     try {
@@ -371,6 +717,8 @@ class ScraperEngine {
 
       page = await context.newPage();
 
+      this._emitProgress({ url, status: 'navigating' });
+
       if (options.captcha) {
         await page.addInitScript(() => {
           Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
@@ -404,15 +752,12 @@ class ScraperEngine {
         }
       }
 
-      if (options.scroll) {
-        scrolls = await handleInfiniteScroll(page, options);
-      }
-
-      await handleLazyImages(page);
-
       if (options.captcha) {
         this._emitProgress({ url, status: 'captcha-start', headed: !this._resolveHeadless(options) });
-        captchaResult = await solve_captcha(page, this.config.captcha, (data) => {
+        captchaResult = await solve_captcha(page, {
+          ...this.config.captcha,
+          quickScan: options.captchaQuickScan,
+        }, (data) => {
           this._emitProgress({ url, status: 'captcha-progress', ...data });
         });
 
@@ -446,40 +791,65 @@ class ScraperEngine {
         }
       }
 
-      if (options.bypassLogin !== false) {
+      if (options.scroll) {
+        scrolls = await handleInfiniteScroll(page, { ...options, fast: options.fast });
+      }
+
+      if (!options.skipLazyImages) {
+        await handleLazyImages(page);
+      }
+
+      if (!options.fast && options.bypassLogin !== false) {
         await dismissLoginWall(page, { ...options, loginWallAttempts: 1 }).catch(() => 0);
       }
 
       renderMs = Date.now() - renderStart;
       const extractStart = Date.now();
 
-      const html = await page.content();
+      const out = this._resolveOutputOptions(options);
+      const pageContent = await extractPageContent(page, { llmMode: out.outputMode === 'llm' });
+      const fullHtml = await page.content();
       const status = response?.status() ?? 200;
       const headers = response?.headers() ?? {};
 
-      const { markdown, wordCount } = htmlToMarkdown(html, {
+      const { markdown, wordCount, meta } = htmlToMarkdown(pageContent.bodyHtml, {
         url,
-        frontMatter: this.config.output.frontMatter !== false,
-        stats: {
+        fullHtml,
+        description: extractDescription(fullHtml),
+        mainContent: out.outputMode === 'llm',
+        navLinks: pageContent.navLinks,
+        headerLinks: pageContent.headerLinks,
+        footerLinks: pageContent.footerLinks,
+        asideLinks: pageContent.asideLinks,
+        breadcrumbLinks: pageContent.breadcrumbLinks,
+        ...this._markdownOptions(options, {
           status,
           contentType: headers['content-type'],
           etag: headers.etag,
           durationMs: Date.now() - start,
           scrolls,
           captcha: captchaResult.solved,
-        },
+        }),
       });
 
       extractMs = Date.now() - extractStart;
 
-      const outputDir = resolvePath(options.output ?? this.config.output.dir);
-      fs.mkdirSync(outputDir, { recursive: true });
-      const outputFile = path.join(outputDir, `${slugify(url)}.md`);
-      fs.writeFileSync(outputFile, markdown);
+      const { outputFile } = this._writeScrapeOutput(
+        url,
+        {
+          markdown,
+          wordCount,
+          status,
+          totalMs: Date.now() - start,
+          title: meta?.title ?? resolveTitle(fullHtml, url),
+          description: extractDescription(fullHtml),
+        },
+        options,
+      );
 
       if (useCache) {
         this.cache.set(url, {
-          html,
+          html: options.storeHtml ? fullHtml : null,
           markdown,
           wordCount,
           status,
@@ -518,6 +888,7 @@ class ScraperEngine {
       };
     } catch (err) {
       this.logger.error('Scrape failed', { url, error: err.message });
+      this._emitProgress({ url, status: 'failed', error: err.message });
       return {
         url,
         status: null,
@@ -543,7 +914,7 @@ class ScraperEngine {
   async run(opts = {}) {
     const urls = Array.isArray(opts.urls) ? opts.urls : [opts.url].filter(Boolean);
     const run = this.reporter.createRun({ cliArgs: opts.cliArgs ?? [] });
-    const concurrency = opts.concurrency ?? this.config.scraper.concurrency ?? 3;
+    const concurrency = opts.concurrency ?? this.config.scraper.concurrency ?? 5;
 
     const queue = [...urls];
     const workers = Array.from({ length: Math.min(concurrency, urls.length) }, async () => {

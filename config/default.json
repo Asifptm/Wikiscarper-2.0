@@ -1,32 +1,47 @@
 {
   "scraper": {
-    "concurrency": 3,
-    "timeout": 30000,
+    "concurrency": 5,
+    "batchMax": 5,
+    "timeout": 20000,
     "waitFor": "domcontentloaded",
-    "idleTimeout": 60000,
+    "idleTimeout": 10000,
+    "scroll": true,
+    "fastMode": true,
     "blockResources": ["image", "media", "font", "stylesheet"],
     "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "viewport": { "width": 1440, "height": 900 },
-    "headless": true
+    "viewport": { "width": 1280, "height": 720 },
+    "headless": true,
+    "publicFirst": true,
+    "bypassLogin": true
   },
   "cache": {
-    "memory": { "maxItems": 500, "maxSizeMB": 50, "ttl": 300 },
+    "memory": { "maxItems": 100, "maxSizeMB": 20, "ttl": 300 },
     "sqlite": { "ttl": 86400, "path": "./cache/scraper.db" },
-    "disk": { "path": "./cache/blobs", "ttl": 604800, "maxSizeMB": 2048 },
+    "disk": { "path": "./cache/blobs", "ttl": 604800, "maxSizeMB": 512 },
     "etag": true
   },
   "captcha": {
+    "enabled": true,
     "mode": "auto",
-    "headed": true,
+    "headed": false,
     "timeout": 180000,
     "autoTimeout": 45000,
     "pollInterval": 500,
     "allowManualFallback": true,
     "blockResources": ["media", "font"]
   },
+  "reddit": {
+    "enabled": true
+  },
+  "instagram": {
+    "enabled": true
+  },
   "output": {
     "dir": "./output",
+    "mode": "full",
     "frontMatter": true,
+    "fullPage": true,
+    "llmStrict": false,
     "assets": false
   },
   "reports": {

@@ -2,6 +2,8 @@ const { sleep } = require('../shared/utils');
 
 // Site-specific overlay/dialog selectors that gate otherwise-public content.
 const SITE_SELECTORS = {
+  'reddit.com': ['#overlay', 'div[role="dialog"]', '.XPromoPopup'],
+  'old.reddit.com': ['#overlay', 'div[role="dialog"]'],
   'instagram.com': [
     'div[role="presentation"]',
     'div[role="dialog"]',
@@ -16,6 +18,9 @@ const SITE_SELECTORS = {
   ],
   'twitter.com': ['div[role="dialog"]', 'div[data-testid="sheetDialog"]'],
   'x.com': ['div[role="dialog"]', 'div[data-testid="sheetDialog"]'],
+  'linkedin.com': ['div[role="dialog"]', '.modal__overlay', '.contextual-sign-in-modal'],
+  'pinterest.com': ['div[role="dialog"]', '[data-test-id="login-modal"]'],
+  'medium.com': ['div[role="dialog"]', '.metabar-overlay'],
 };
 
 function matchSiteSelectors(url) {

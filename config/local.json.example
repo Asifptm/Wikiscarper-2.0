@@ -1,12 +1,14 @@
 {
   "scraper": {
-    "headless": false,
-    "blockResources": ["media", "font"]
+    "concurrency": 3,
+    "timeout": 45000,
+    "headless": true
   },
   "captcha": {
+    "enabled": true,
     "mode": "auto",
-    "headed": true,
+    "headed": false,
     "timeout": 180000,
-    "allowManualFallback": true
+    "allowManualFallback": false
   }
 }

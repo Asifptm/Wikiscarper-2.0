@@ -46,7 +46,7 @@ async function waitForCaptchaWidget(page, timeout = 15000) {
       { timeout, state: 'attached' },
     )
     .catch(() => {});
-  await page.waitForTimeout(1500);
+  await page.waitForTimeout(timeout <= 3000 ? 200 : 1500);
 }
 
 async function readCaptchaToken(page, tokenSelector, type) {
@@ -152,7 +152,7 @@ async function solve_captcha(page, config = {}, onStep = null) {
 
   try {
     emit({ step: 'scanning' });
-    await waitForCaptchaWidget(page);
+    await waitForCaptchaWidget(page, config.quickScan ? 2500 : 15000);
 
     const type = await detectCaptchaType(page);
     if (!type) {

@@ -1,6 +1,7 @@
 {
+  "enabled": true,
   "mode": "auto",
-  "headed": true,
+  "headed": false,
   "timeout": 180000,
   "autoTimeout": 45000,
   "pollInterval": 500,

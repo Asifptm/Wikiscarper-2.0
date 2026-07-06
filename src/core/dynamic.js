@@ -1,9 +1,10 @@
 const { sleep } = require('../shared/utils');
 
 async function handleInfiniteScroll(page, options = {}) {
+  const fast = options.fast === true;
   const {
-    maxScrolls = 20,
-    scrollDelay = 1500,
+    maxScrolls = fast ? 5 : 20,
+    scrollDelay = fast ? 600 : 1500,
     itemSelector = null,
   } = options;
 
@@ -20,7 +21,9 @@ async function handleInfiniteScroll(page, options = {}) {
     previousCount = currentCount;
     await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
     await page.waitForTimeout(scrollDelay);
-    await page.waitForLoadState('networkidle').catch(() => {});
+    if (!fast) {
+      await page.waitForLoadState('networkidle').catch(() => {});
+    }
     scrollCount += 1;
   }
 
