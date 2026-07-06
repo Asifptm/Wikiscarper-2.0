@@ -139,64 +139,6 @@ cp config/local.json.example config/local.json
 
 ## Usage
 
-### Quick star
-
-```bash
-# One URL → markdown on stdout
-npm start scrape "https://example.com" --stdout
-
-# Save to output/
-npm start scrape "https://en.wikipedia.org/wiki/Web_scraping"
-
-# Multiple URLs (no login — works for Reddit, Instagram, any public page)
-npm start scrape "https://example.com" "https://www.reddit.com/r/MachineLearning/"
-
-# URLs from file
-npm start scrape --file urls.txt
-
-# JSON response
-npm start scrape "https://example.com" --format json --stdout
-```
-
-### Live progress UI
-
-While scraping, the CLI shows:
-
-- **Banner & config** — session header, options table, and target URLs
-- **Single progress bar** — one updating line with percent, count, current URL, and phase
-- **Results table** — colored `OK` / `FAIL` rows with HTTP status, captcha, words, time, URL, output file, and error
-
-Use `--quiet` to suppress all terminal output.
-
-```bash
-npm start scrape "https://example.com"           # full progress UI
-npm start scrape "https://example.com" --quiet   # silent mode
-```
-
-### No login required (automatic)
-
-Every URL uses public access strategies automatically — no special flags:
-
-
-| Site             | Strategy                                                              |
-| ---------------- | --------------------------------------------------------------------- |
-| **Any URL**      | Direct HTTP fetch first, then browser with login-wall dismissal       |
-| **Reddit**       | old.reddit.com public HTML                                            |
-| **Instagram**    | oEmbed API + embed fallback                                           |
-| **Social sites** | Login/sign-up modals removed (Instagram, Facebook, X, LinkedIn, etc.) |
-
-
-```bash
-# Reddit — no account needed
-npm start scrape "https://www.reddit.com/r/MachineLearning/"
-
-# Instagram — no account needed
-npm start scrape "https://www.instagram.com/natgeo/"
-
-# Any public page
-npm start scrape "https://news.ycombinator.com"
-```
-
 ### Commands
 
 ```bash
