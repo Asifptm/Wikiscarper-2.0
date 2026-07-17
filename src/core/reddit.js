@@ -1,6 +1,7 @@
 const { URL } = require('node:url');
 const { fetchUrl } = require('./httpClient');
 const { htmlToMarkdownBuiltin } = require('./extractor');
+const { profileToMarkdown, buildFrontMatter, countWords } = require('./social/common');
 
 const REDDIT_HOSTS = ['reddit.com', 'old.reddit.com', 'redd.it', 'www.reddit.com'];
 
@@ -25,6 +26,41 @@ function toOldRedditUrl(url) {
 
 function isPostUrl(url) {
   return /\/comments\/[a-z0-9]+\//i.test(url);
+}
+
+function parseRedditUrl(url) {
+  try {
+    const parsed = new URL(url);
+    const parts = parsed.pathname.replace(/^\/+|\/+$/g, '').split('/').filter(Boolean);
+    if (!parts.length) return { kind: 'unknown' };
+    const head = parts[0].toLowerCase();
+    if (head === 'r' && parts[1]) return { kind: 'subreddit', name: parts[1] };
+    if ((head === 'u' || head === 'user') && parts[1]) return { kind: 'user', name: parts[1] };
+    if (parts.includes('comments')) return { kind: 'post' };
+    return { kind: 'unknown' };
+  } catch {
+    return { kind: 'unknown' };
+  }
+}
+
+function toOldRedditUserUrl(username) {
+  return `https://old.reddit.com/user/${encodeURIComponent(username)}/`;
+}
+
+function parseUserSidebar(html, baseUrl) {
+  const titlebox = html.match(/class="titlebox[\s\S]*?<\/form>/i)?.[0] ?? '';
+  const karmaText = stripTags(titlebox.match(/class="karma"[\s\S]*?<\/span>[\s\S]*?<\/span>/)?.[0] ?? '');
+  const karmaMatch = karmaText.match(/([\d,]+)/);
+  const cakeDay = titlebox.match(/class="age"[\s\S]*?<time[^>]*title="([^"]+)"/i)?.[1] ?? null;
+  const bioHtml =
+    titlebox.match(/class="usertext-body[\s\S]*?<div class="md">([\s\S]*?)<\/div>/)?.[1] ?? '';
+  const bio = mdFromHtmlFragment(bioHtml, baseUrl);
+
+  return {
+    karma: karmaMatch ? karmaMatch[1].replace(/,/g, '') : null,
+    cakeDay,
+    bio,
+  };
 }
 
 function absUrl(href, base) {
@@ -64,6 +100,21 @@ function mdFromHtmlFragment(html, url) {
 const THING_POST_SPLIT = /<div class="\s*thing id-t3_/;
 const THING_COMMENT_SPLIT = /<div class="\s*thing id-t1_/;
 
+const PLACEHOLDER_THUMB_RE =
+  /redditstatic\.com\/(new-icon|icon|interstitial|self|default|nsfw|spoiler|thumb)/i;
+
+function extractPostThumbnail(chunk, baseUrl) {
+  const thumbMatch = chunk.match(/<a class="thumbnail[^"]*"[^>]*>[\s\S]*?<img[^>]+src="([^"]+)"/i);
+  if (thumbMatch?.[1] && !PLACEHOLDER_THUMB_RE.test(thumbMatch[1])) {
+    return absUrl(thumbMatch[1].startsWith('//') ? `https:${thumbMatch[1]}` : thumbMatch[1], baseUrl);
+  }
+  const bgMatch = chunk.match(/background-image:\s*url\(['"]?([^'")]+)/i);
+  if (bgMatch?.[1] && !PLACEHOLDER_THUMB_RE.test(bgMatch[1])) {
+    return absUrl(bgMatch[1], baseUrl);
+  }
+  return null;
+}
+
 function parseListingPosts(html, baseUrl) {
   const posts = [];
   const chunks = html.split(THING_POST_SPLIT).slice(1);
@@ -80,6 +131,7 @@ function parseListingPosts(html, baseUrl) {
     const flair = chunk.match(/<span class="linkflairlabel[^"]*"[^>]*>([\s\S]*?)<\/span>/)?.[1];
     const selfHtml = chunk.match(/<div class="expando[\s\S]*?<div class="md">([\s\S]*?)<\/div>/)?.[1] ?? '';
     const selftext = mdFromHtmlFragment(selfHtml, baseUrl);
+    const thumbnailUrl = extractPostThumbnail(chunk, baseUrl);
 
     posts.push({
       title,
@@ -89,6 +141,7 @@ function parseListingPosts(html, baseUrl) {
       comments,
       url: absUrl(permalink, baseUrl),
       selftext,
+      thumbnailUrl,
     });
   }
 
@@ -146,6 +199,10 @@ function listingToMarkdown(subreddit, posts, url) {
     parts.push('');
     parts.push(`By **u/${post.author}** · Score **${post.score}** · ${post.comments} comments`);
     parts.push('');
+    if (post.thumbnailUrl) {
+      parts.push(`![${post.title}](${post.thumbnailUrl})`);
+      parts.push('');
+    }
     if (post.selftext) {
       parts.push(post.selftext);
       parts.push('');
@@ -161,6 +218,20 @@ function listingToMarkdown(subreddit, posts, url) {
   return parts.join('\n').trim();
 }
 
+function extractPostPreview(html, baseUrl) {
+  const thumb =
+    html.match(/<a class="thumbnail[^>]*>[\s\S]*?<img[^>]+src="([^"]+)"/i)?.[1] ??
+    html.match(/property="og:image" content="([^"]+)"/i)?.[1] ??
+    null;
+  if (!thumb) return null;
+  if (/redditstatic\.com\/(new-icon|icon|interstitial)/i.test(thumb)) return null;
+  try {
+    return new URL(thumb.startsWith('//') ? `https:${thumb}` : thumb, baseUrl).href;
+  } catch {
+    return thumb.startsWith('//') ? `https:${thumb}` : thumb;
+  }
+}
+
 function postToMarkdown(data, url) {
   const parts = [
     `# ${data.title}`,
@@ -174,6 +245,11 @@ function postToMarkdown(data, url) {
     `By **u/${data.author}** · Score **${data.score}** · ${data.comments} comments`,
     '',
   ];
+
+  if (data.previewUrl) {
+    parts.push(`![Post image](${data.previewUrl})`);
+    parts.push('');
+  }
 
   if (data.body) {
     parts.push(data.body);
@@ -196,20 +272,6 @@ function postToMarkdown(data, url) {
   parts.push('');
 
   return parts.join('\n').trim();
-}
-
-function countWords(text) {
-  return text.split(/\s+/).filter(Boolean).length;
-}
-
-function buildFrontMatter(meta) {
-  const lines = ['---'];
-  for (const [key, value] of Object.entries(meta)) {
-    const formatted = typeof value === 'string' ? `"${value.replace(/"/g, '\\"')}"` : value;
-    lines.push(`${key}: ${formatted}`);
-  }
-  lines.push('---', '');
-  return lines.join('\n');
 }
 
 async function scrapeRedditPublic(url, options = {}) {
@@ -238,11 +300,49 @@ async function scrapeRedditPublic(url, options = {}) {
 
   let markdown;
   let title;
+  let previewUrl = null;
+  let postCount = 0;
+  const parsed = parseRedditUrl(url);
 
   if (isPostUrl(oldUrl)) {
     const post = parsePostPage(html, oldUrl);
+    previewUrl = extractPostPreview(html, oldUrl);
+    post.previewUrl = previewUrl;
     title = post.title;
     markdown = postToMarkdown(post, url);
+  } else if (parsed.kind === 'user') {
+    const userUrl = toOldRedditUserUrl(parsed.name);
+    const userRes =
+      userUrl === oldUrl
+        ? { body: html, statusCode: res.statusCode }
+        : await fetchUrl(userUrl, { userAgent, timeout: options.timeout ?? 30000 });
+    const userHtml = userRes.body;
+    const sidebar = parseUserSidebar(userHtml, userUrl);
+    const listing = parseListingPosts(userHtml, userUrl);
+    if (!listing.length) {
+      throw new Error('ERR_REDDIT_EMPTY: No public posts found on Reddit user profile');
+    }
+    postCount = listing.length;
+    const profile = {
+      fullName: `u/${parsed.name}`,
+      username: parsed.name,
+      bio: sidebar.bio || '_No bio._',
+      karma: sidebar.karma,
+      posts: listing.length,
+      profileUrl: userUrl,
+    };
+    const posts = listing.map((post) => ({
+      kind: 'Post',
+      title: post.title,
+      caption: post.selftext || post.title,
+      score: post.score,
+      comments: post.comments,
+      thumbnailUrl: post.thumbnailUrl,
+      url: post.url,
+    }));
+    title = `u/${parsed.name} on Reddit`;
+    markdown = profileToMarkdown('Reddit', profile, posts, url);
+    previewUrl = listing.find((p) => p.thumbnailUrl)?.thumbnailUrl ?? extractPostPreview(userHtml, userUrl);
   } else {
     const subreddit =
       stripTags(html.match(/<title>([^<]+)<\/title>/)?.[1] ?? '') || 'Reddit';
@@ -250,8 +350,10 @@ async function scrapeRedditPublic(url, options = {}) {
     if (!posts.length) {
       throw new Error('ERR_REDDIT_EMPTY: No public posts found on Reddit page');
     }
+    postCount = posts.length;
     title = subreddit;
     markdown = listingToMarkdown(subreddit, posts, url);
+    previewUrl = extractPostPreview(html, oldUrl);
   }
 
   const wordCount = countWords(markdown);
@@ -266,6 +368,7 @@ async function scrapeRedditPublic(url, options = {}) {
       word_count: wordCount,
       scrape_duration_ms: Date.now() - start,
     };
+    if (postCount) meta.post_count = postCount;
     markdown = buildFrontMatter(meta) + markdown + '\n';
   }
 
@@ -276,11 +379,19 @@ async function scrapeRedditPublic(url, options = {}) {
     status: res.statusCode,
     navMs,
     method: 'reddit-public',
+    html,
+    previewUrl,
   };
+}
+
+function needsBrowserPool(url) {
+  return false;
 }
 
 module.exports = {
   isRedditUrl,
   toOldRedditUrl,
+  parseRedditUrl,
   scrapeRedditPublic,
+  needsBrowserPool,
 };

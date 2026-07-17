@@ -26,6 +26,7 @@ function buildScrapeResponse(pageResult, meta = {}) {
             wordCount: pageResult.word_count ?? 0,
             scrapeDurationMs: pageResult.total_ms ?? 0,
             cacheHit: pageResult.cache_hit ?? false,
+            images: meta.images ?? pageResult.images ?? [],
           },
         }
       : null,

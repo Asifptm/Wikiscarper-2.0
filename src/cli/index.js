@@ -62,6 +62,7 @@ function buildScrapeOptions(options, urls, config) {
     report: options.report ?? multi,
     reportFormat: options.reportFormat,
     stdout: options.stdout && urls.length === 1,
+    includeImages: options.images !== false,
   };
 }
 
@@ -95,6 +96,8 @@ function attachScrapeOptions(cmd) {
     .option('--report', 'Write scrape report')
     .option('--no-report', 'Skip scrape report')
     .option('--report-format <fmt>', 'Report format: json|html|both', 'both')
+    .option('--images', 'Extract image URLs from page content', true)
+    .option('--no-images', 'Skip extracting image URLs from page content')
     .option('-v, --verbose', 'Verbose logging')
     .option('-q, --quiet', 'Suppress progress UI');
 }

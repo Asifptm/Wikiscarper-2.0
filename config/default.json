@@ -31,10 +31,36 @@
     "blockResources": ["media", "font"]
   },
   "reddit": {
-    "enabled": true
+    "enabled": true,
+    "maxProfilePosts": 24
   },
   "instagram": {
-    "enabled": true
+    "enabled": true,
+    "maxProfilePosts": 24
+  },
+  "x": {
+    "enabled": true,
+    "maxProfilePosts": 24
+  },
+  "youtube": {
+    "enabled": true,
+    "maxProfilePosts": 24
+  },
+  "tiktok": {
+    "enabled": true,
+    "maxProfilePosts": 24
+  },
+  "linkedin": {
+    "enabled": true,
+    "maxProfilePosts": 24
+  },
+  "pinterest": {
+    "enabled": true,
+    "maxProfilePosts": 24
+  },
+  "facebook": {
+    "enabled": true,
+    "maxProfilePosts": 24
   },
   "output": {
     "dir": "./output",
@@ -42,7 +68,8 @@
     "frontMatter": true,
     "fullPage": true,
     "llmStrict": false,
-    "assets": false
+    "includeImages": true,
+    "siteHandlers": true
   },
   "reports": {
     "dir": "./reports"

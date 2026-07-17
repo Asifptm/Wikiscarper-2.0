@@ -46,7 +46,7 @@ const CHROME_SELECTORS =
 const CODE_TAGS =
   /<(script|style|noscript|template|code)[^>]*>[\s\S]*?<\/\1>/gi;
 
-function createTurndown() {
+function createTurndown(baseUrl) {
   const td = new TurndownService({
     headingStyle: 'atx',
     bulletListMarker: '-',
@@ -83,9 +83,17 @@ function createTurndown() {
     filter: 'img',
     replacement: (_, node) => {
       const alt = node.getAttribute('alt')?.trim();
-      const src = node.getAttribute('src') ?? '';
+      let src = node.getAttribute('src') ?? node.getAttribute('data-src') ?? '';
       if (!alt && !src) return '';
       if (src.startsWith('data:')) return '';
+      if (src.startsWith('//')) src = `https:${src}`;
+      else if (baseUrl && src && !/^https?:/i.test(src)) {
+        try {
+          src = new URL(src, baseUrl).href;
+        } catch {
+          /* keep relative */
+        }
+      }
       return `\n\n![${alt || 'Image'}](${src})\n\n`;
     },
   });
@@ -514,7 +522,7 @@ function resolveTitle(html, url) {
 function htmlToMarkdown(html, options = {}) {
   const outputMode = options.outputMode ?? 'llm';
   const fullPage = options.fullPage ?? outputMode === 'full';
-  const td = createTurndown();
+  const td = createTurndown(options.url);
 
   const sectionLinks =
     outputMode === 'full'

@@ -37,6 +37,7 @@ Headless rendering with **Playwright** + Chromium, smart main-content extraction
 
 - **No login required** — public HTTP fetch first, automatic login-wall dismissal, and site-specific public endpoints (Reddit, Instagram) for every URL.
 - **LLM-ready markdown** — extracts main content only; strips nav, ads, scripts, and CSS noise.
+- **Site-specific public scrapers** — Reddit, Instagram, X, YouTube, TikTok, LinkedIn, Pinterest, and Facebook profiles/posts via public endpoints (no login).
 - **Single `scrape` command** — one or many URLs, optional `--file`, stdout/JSON output.
 - **Real browser rendering** — Playwright + Chromium when public fetch is not enough.
 - **3-tier cache** — Memory (LRU) → SQLite → Disk (gzip blobs).
@@ -44,6 +45,8 @@ Headless rendering with **Playwright** + Chromium, smart main-content extraction
 - **Low resource footprint** — single shared browser, idle auto-close, blocked heavy assets.
 - **CAPTCHA handler** — browser-native solver enabled by default (`--no-captcha` to disable).
 - **Full-page mode** — optional nav/footer/link sections with `--full`.
+- **Content images** — every scrape extracts image URLs and links them in the markdown (`--no-images` to disable).
+- **Auto site handlers** — Reddit, Instagram, X, YouTube, TikTok, LinkedIn, Pinterest, and Facebook URLs are detected automatically on any scrape.
 
 ---
 
@@ -139,6 +142,89 @@ cp config/local.json.example config/local.json
 
 ## Usage
 
+### Quick start
+
+```bash
+# One URL → markdown on stdout
+npm start scrape "https://example.com" --stdout
+
+# Save to output/
+npm start scrape "https://en.wikipedia.org/wiki/Web_scraping"
+
+# Multiple URLs (no login — works for Reddit, Instagram, any public page)
+npm start scrape "https://example.com" "https://www.reddit.com/r/MachineLearning/"
+
+# URLs from file
+npm start scrape --file urls.txt
+
+# JSON response
+npm start scrape "https://example.com" --format json --stdout
+```
+
+### Live progress UI
+
+While scraping, the CLI shows:
+
+- **Banner & config** — session header, options table, and target URLs
+- **Single progress bar** — one updating line with percent, count, current URL, and phase
+- **Results table** — colored `OK` / `FAIL` rows with HTTP status, captcha, words, time, URL, output file, and error
+
+Use `--quiet` to suppress all terminal output.
+
+```bash
+npm start scrape "https://example.com"           # full progress UI
+npm start scrape "https://example.com" --quiet   # silent mode
+```
+
+### No login required (automatic)
+
+Every URL uses public access strategies automatically — no special flags:
+
+
+| Site             | Strategy                                                              |
+| ---------------- | --------------------------------------------------------------------- |
+| **Any URL**      | Direct HTTP fetch first, then browser with login-wall dismissal       |
+| **Reddit**       | Subreddit, user profile, and post pages via old.reddit.com           |
+| **Instagram**    | Profile browser scrape + oEmbed for posts/reels (no login)            |
+| **X / Twitter**  | Public syndication API for profiles and posts                         |
+| **YouTube**      | Channel metadata + recent videos via ytInitialData                    |
+| **TikTok**       | Profile + videos via embedded page data and oEmbed                    |
+| **LinkedIn**     | Company/profile pages via JSON-LD + browser feed scrape               |
+| **Pinterest**    | Profile pin grid via browser + pin metadata                           |
+| **Facebook**     | Public pages via og metadata + browser feed scrape                    |
+| **Social sites** | Login/sign-up modals removed (Instagram, Facebook, X, LinkedIn, etc.) |
+
+
+```bash
+# Reddit subreddit or user profile
+npm start scrape "https://www.reddit.com/r/programming/"
+npm start scrape "https://www.reddit.com/user/spez/"
+
+# Instagram profile — bio, stats, recent posts (no login)
+npm start scrape "https://www.instagram.com/microsoft/"
+
+# X profile — bio + recent posts
+npm start scrape "https://x.com/Reddit"
+
+# YouTube channel
+npm start scrape "https://www.youtube.com/@Microsoft/videos"
+
+# TikTok profile
+npm start scrape "https://www.tiktok.com/@microsoft"
+
+# LinkedIn company page
+npm start scrape "https://www.linkedin.com/company/microsoft/"
+
+# Pinterest profile
+npm start scrape "https://www.pinterest.com/pinterest/"
+
+# Facebook public page
+npm start scrape "https://www.facebook.com/Microsoft/"
+
+# Any public page
+npm start scrape "https://news.ycombinator.com"
+```
+
 ### Commands
 
 ```bash
@@ -179,6 +265,7 @@ npm start scrape --help
 | `--no-llm-strict`       | Disable aggressive LLM cleanup (keep site chrome) |
 | `--no-bypass-login`     | Do not dismiss login/sign-up modals           |
 | `--no-cache`            | Bypass cache                                  |
+| `--no-images`           | Skip extracting image URLs from content       |
 | `-C, --concurrency <n>` | Parallel workers (multi-URL)                  |
 | `-o, --output <dir>`    | Output directory                              |
 | `-q, --quiet`           | Suppress progress UI                          |

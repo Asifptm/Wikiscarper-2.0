@@ -126,6 +126,7 @@ class ScrapeTerminalUI {
       ['scroll', opts.scroll ? 'on' : 'off'],
       ['cache', opts.cache !== false ? 'on' : 'off'],
       ['captcha', opts.captcha ? 'on' : 'off'],
+      ['images', opts.includeImages !== false ? 'on' : 'off'],
       ['report', opts.report ? 'on' : 'off'],
       ['concurrency', String(opts.concurrency ?? 5)],
     ];
@@ -203,6 +204,9 @@ class ScrapeTerminalUI {
         break;
       case 'fallback-instagram':
         this.setPhase(url, 'instagram fallback', 30);
+        break;
+      case 'fallback-x':
+        this.setPhase(url, 'x fallback', 30);
         break;
       case 'login-wall-dismissed':
         this.setPhase(url, 'login wall', 35);
